@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -443,6 +445,11 @@ def triton_kernel_fused_experts(
     return output_tensor
 
 
+_PACK_BITMATRIX_OPT_V2 = os.environ.get(
+    "ENABLE_PACK_BITMATRIX_OPT_V2", "0"
+) == "1"
+
+
 def make_routing_data(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -453,24 +460,44 @@ def make_routing_data(
 
     n_rows, num_topk = topk_ids.size()
 
-    BLOCK_SIZE_M = 512
-    BLOCK_SIZE_K = 32
+    if _PACK_BITMATRIX_OPT_V2:
+        from vllm.model_executor.layers.fused_moe.experts.pack_bitmatrix_optimization.pack_bitmatrix_v2 import (  # noqa: E501
+            pack_bitmatrix_v2,
+        )
 
-    bm_cols = triton.cdiv(num_local_experts, BLOCK_SIZE_K)  # n_bitpacks
-    bitmatrix = torch.zeros(
-        (n_rows, bm_cols), dtype=torch.uint32, device=topk_ids.device
-    )
-
-    grid = (triton.cdiv(n_rows, BLOCK_SIZE_M),)
-    pack_bitmatrix[grid](
-        bitmatrix,
-        topk_ids,
-        n_rows,
-        bm_cols,
-        num_topk,
-        BLOCK_SIZE_M=BLOCK_SIZE_M,
-        BLOCK_SIZE_K=BLOCK_SIZE_K,
-    )
+        BLOCK_SIZE_M = 256
+        BLOCK_SIZE_K = 8
+        bm_cols = triton.cdiv(num_local_experts, 32)
+        bitmatrix = torch.zeros(
+            (n_rows, bm_cols), dtype=torch.uint32, device=topk_ids.device
+        )
+        grid = (triton.cdiv(n_rows, BLOCK_SIZE_M),)
+        pack_bitmatrix_v2[grid](
+            bitmatrix,
+            topk_ids,
+            n_rows,
+            bm_cols,
+            num_topk,
+            BLOCK_SIZE_M=BLOCK_SIZE_M,
+            BLOCK_SIZE_K=BLOCK_SIZE_K,
+        )
+    else:
+        BLOCK_SIZE_M = 512
+        BLOCK_SIZE_K = 32
+        bm_cols = triton.cdiv(num_local_experts, BLOCK_SIZE_K)  # n_bitpacks
+        bitmatrix = torch.zeros(
+            (n_rows, bm_cols), dtype=torch.uint32, device=topk_ids.device
+        )
+        grid = (triton.cdiv(n_rows, BLOCK_SIZE_M),)
+        pack_bitmatrix[grid](
+            bitmatrix,
+            topk_ids,
+            n_rows,
+            bm_cols,
+            num_topk,
+            BLOCK_SIZE_M=BLOCK_SIZE_M,
+            BLOCK_SIZE_K=BLOCK_SIZE_K,
+        )
 
     bitmatrix_shape = [n_rows, bm_cols * 32]
     bitmatrix_shape_max = [n_rows, None]
