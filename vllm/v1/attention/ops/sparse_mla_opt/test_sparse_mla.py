@@ -9,7 +9,7 @@ isl/osl=1024/1024, max_num_seqs=128, concurrency=4.
 Usage:
     python test_sparse_mla.py
     python test_sparse_mla.py --warmup 50 --rep 200 -o results.csv
-    python test_sparse_mla.py --batch 1 4 --mode padded ragged
+    python test_sparse_mla.py --batch 1 4 --mode hca csa
 
 Modes:
     (default)    Outer driver: spawns rocprofv3 per config, parses traces,
@@ -46,29 +46,26 @@ LATENT_KV_HEADS = 2
 SWA_WINDOW = 128
 TOPK_BUDGET = 8192
 
-# Representative test configurations: (batch, mode, topk_ragged_len, label)
-# "padded" / CSA = topk_indices tensor present (latent cache [N,2,584])
-# "ragged" / HCA = topk_indices=None, kv_cache is full-head [N,64,584]
-# HCA always attends to all pages (1024*B). CSA sparse budget grows
-# incrementally per decode step, reaching 1024*B at steady state.
+# Representative test configurations: (batch, mode, topk_ragged_len)
+# "hca" = HCA layers (compress_ratio=128, latent cache [N,2,584], topk_indices present)
+#          Attends to ALL compressed entries (few entries due to 128:1 compression).
+# "csa" = CSA layers (compress_ratio=4, full-head cache [N,64,584], topk_indices=None)
+#          Uses sparse top-K selection (many entries due to 4:1 compression).
+#
+# Batch=4, per-request topk ranges: CSA [256..512], HCA [8..16]
 TEST_CONFIGS = [
-    # Steady-state (full context ~1024 sparse pages per request)
-    (1, "padded", 1024, "B1_csa_full"),
-    (1, "ragged", 1024, "B1_hca_full"),
-    (4, "padded", 4096, "B4_csa_full"),
-    (4, "ragged", 4096, "B4_hca_full"),
-    # Early decode (few pages filled, CSA only — HCA always full)
-    (1, "padded", 8,    "B1_csa_early"),
-    (4, "padded", 32,   "B4_csa_early"),
-    # Mid decode
-    (1, "padded", 128,  "B1_csa_mid"),
-    (4, "padded", 512,  "B4_csa_mid"),
-    # Batch=2 steady
-    (2, "padded", 2048, "B2_csa_full"),
-    (2, "ragged", 2048, "B2_hca_full"),
-    # Batch=3 steady
-    (3, "padded", 3072, "B3_csa_full"),
-    (3, "ragged", 3072, "B3_hca_full"),
+    # CSA layers (per-request topk: 256 → 512, 5 equally spaced)
+    (4, "csa", 256 * 4),
+    (4, "csa", 320 * 4),
+    (4, "csa", 384 * 4),
+    (4, "csa", 448 * 4),
+    (4, "csa", 512 * 4),
+    # HCA layers (per-request topk: 8 → 16, 5 equally spaced)
+    (4, "hca", 8 * 4),
+    (4, "hca", 10 * 4),
+    (4, "hca", 12 * 4),
+    (4, "hca", 14 * 4),
+    (4, "hca", 16 * 4),
 ]
 
 
@@ -92,7 +89,7 @@ def build_inputs(batch, mode, topk_ragged_len, device="cuda:0"):
         NUM_BLOCKS, NUM_HEADS, CACHE_LINE, SWA_CACHE_STRIDE0, device,
     )
 
-    if mode == "padded":
+    if mode == "hca":
         kv_cache = _make_noncontig_cache(
             NUM_BLOCKS, LATENT_KV_HEADS, CACHE_LINE, LATENT_CACHE_STRIDE0, device,
         )
@@ -217,9 +214,10 @@ def parse_trace(csv_path, rep):
     return kernel_names, median_us
 
 
-def profile_one(batch, mode, topk_ragged_len, label, warmup, rep, tmpdir,
+def profile_one(batch, mode, topk_ragged_len, warmup, rep, tmpdir,
                 impl="baseline"):
     """Run one config under rocprofv3 and return parsed results."""
+    label = f"B{batch}_{mode}_{topk_ragged_len}"
     tag = f"bench_{label}_{impl}"
     trace_prefix = os.path.join(tmpdir, tag)
     trace_csv = f"{trace_prefix}_kernel_trace.csv"
@@ -270,11 +268,11 @@ def main():
     parser.add_argument("--warmup", type=int, default=25)
     parser.add_argument("--rep", type=int, default=100)
     parser.add_argument("-o", "--output", type=str, default="sparse_mla_results.csv")
-    parser.add_argument("--batch", type=int, nargs="+", default=None,
-                        help="Filter to specific batch sizes")
-    parser.add_argument("--mode", type=str, nargs="+", default=None,
-                        choices=["padded", "ragged"],
-                        help="Filter to specific modes")
+    parser.add_argument("--batch", type=int, nargs="+", default=[4],
+                        help="Filter to specific batch sizes (default: 4)")
+    parser.add_argument("--mode", type=str, nargs="+", default=["hca", "csa"],
+                        choices=["hca", "csa"],
+                        help="Filter to specific modes (default: both)")
     parser.add_argument("--impl", type=str, default="baseline",
                         choices=["baseline", "v1"],
                         help="Kernel implementation to benchmark")
@@ -294,32 +292,32 @@ def main():
     if args.mode:
         configs = [c for c in configs if c[1] in args.mode]
 
-    csv_header = ["label", "batch", "mode", "topk_ragged_len", "time_us", "kernels"]
+    csv_header = ["batch", "mode", "topk_ragged_len", "time_us", "kernels"]
     rows = []
 
     print(f"\n{'='*90}")
     print(f"  rocm_sparse_attn_decode benchmark  (warmup={args.warmup}, rep={args.rep})")
     print(f"{'='*90}")
-    print(f"{'Label':<22s} {'B':>3s} {'Mode':<8s} {'topk_rag':>10s} {'time_us':>10s}")
-    print(f"{'-'*70}")
+    print(f"{'B':>3s} {'Mode':<5s} {'topk_rag':>10s} {'time_us':>10s}")
+    print(f"{'-'*40}")
 
     with tempfile.TemporaryDirectory(prefix="bench_sparse_mla_") as tmpdir:
-        for batch, mode, topk_ragged_len, label in configs:
+        for batch, mode, topk_ragged_len in configs:
             result = profile_one(
-                batch, mode, topk_ragged_len, label,
+                batch, mode, topk_ragged_len,
                 args.warmup, args.rep, tmpdir, impl=args.impl,
             )
             if result is None:
-                print(f"{label:<22s} {batch:>3d} {mode:<8s} {topk_ragged_len:>10d}    FAILED")
+                print(f"{batch:>3d} {mode:<5s} {topk_ragged_len:>10d}    FAILED")
                 continue
 
-            print(f"{label:<22s} {batch:>3d} {mode:<8s} "
+            print(f"{batch:>3d} {mode:<5s} "
                   f"{topk_ragged_len:>10d} {result['time_us']:>10.3f}")
             if result["kernels"]:
                 print(f"  kernels: {result['kernels']}")
 
             rows.append([
-                result["label"], result["batch"], result["mode"],
+                result["batch"], result["mode"],
                 result["topk_ragged_len"],
                 f"{result['time_us']:.3f}",
                 result["kernels"],

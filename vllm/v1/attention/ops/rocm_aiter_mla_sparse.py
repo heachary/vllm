@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import importlib
+import logging
 import math
 from importlib.util import find_spec
 
@@ -14,6 +15,8 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
+
+logger = logging.getLogger(__name__)
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 
 if current_platform.is_rocm():
@@ -1659,6 +1662,7 @@ def _log_shapes(
     topk_ragged_indices_sig, topk_ragged_indptr_sig,
     attn_sink_sig, scale, head_dim, nope_head_dim,
     rope_head_dim, output_sig,
+    total_swa_tokens, total_topk_tokens,
 ):
     def _fmt(name, s):
         if s is None:
@@ -1686,8 +1690,10 @@ def _log_shapes(
     lines.append(f"  head_dim: {head_dim}")
     lines.append(f"  nope_head_dim: {nope_head_dim}")
     lines.append(f"  rope_head_dim: {rope_head_dim}")
+    lines.append(f"  total_swa_tokens: {total_swa_tokens}")
+    lines.append(f"  total_topk_tokens: {total_topk_tokens}")
     lines.append("========================================")
-    print("\n".join(lines), flush=True)
+    logger.warning("\n".join(lines))
 
 
 def rocm_sparse_attn_decode(
@@ -1713,22 +1719,27 @@ def rocm_sparse_attn_decode(
 
     import os
 
-    # def _t_sig(t):
-    #     if t is None:
-    #         return None
-    #     return (tuple(t.shape), t.dtype, str(t.device), t.stride(),
-    #             t.is_contiguous())
+    log_sparse_mla_shapes = os.getenv("VLLM_LOG_SPARSE_MLA_SHAPES", "0")
+    if log_sparse_mla_shapes == "1":
+        def _t_sig(t):
+            if t is None:
+                return None
+            return (tuple(t.shape), t.dtype, str(t.device), t.stride(),
+                    t.is_contiguous())
 
-    # if q.device == torch.device("cuda", 0):
-    #     _log_shapes(
-    #         _t_sig(q), _t_sig(kv_cache), _t_sig(swa_k_cache), swa_only,
-    #         _t_sig(topk_indices), _t_sig(topk_lens),
-    #         _t_sig(swa_indices), _t_sig(swa_lens),
-    #         _t_sig(swa_ragged_indices), _t_sig(swa_ragged_indptr),
-    #         _t_sig(topk_ragged_indices), _t_sig(topk_ragged_indptr),
-    #         _t_sig(attn_sink), scale, head_dim, nope_head_dim,
-    #         rope_head_dim, _t_sig(output),
-    #     )
+        total_swa_tokens = int(swa_ragged_indptr[-1].item()) if swa_ragged_indptr is not None else int(swa_lens.sum().item())
+        total_topk_tokens = int(topk_ragged_indptr[-1].item()) if topk_ragged_indptr is not None else 0
+
+        _log_shapes(
+            _t_sig(q), _t_sig(kv_cache), _t_sig(swa_k_cache), swa_only,
+            _t_sig(topk_indices), _t_sig(topk_lens),
+            _t_sig(swa_indices), _t_sig(swa_lens),
+            _t_sig(swa_ragged_indices), _t_sig(swa_ragged_indptr),
+            _t_sig(topk_ragged_indices), _t_sig(topk_ragged_indptr),
+            _t_sig(attn_sink), scale, head_dim, nope_head_dim,
+            rope_head_dim, _t_sig(output),
+            total_swa_tokens, total_topk_tokens,
+        )
 
     enable_sparse_mla_opt_v1 = os.getenv("VLLM_ENABLE_SPARSE_MLA_OPT_V1", "0")
     if enable_sparse_mla_opt_v1 == "1":
