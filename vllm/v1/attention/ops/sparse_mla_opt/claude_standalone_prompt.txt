@@ -1,0 +1,9 @@
+I want to optimize this kernel : @vllm-upstream/vllm/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:2082-2101 . I have a test :@vllm-upstream/vllm/vllm/v1/attention/ops/sparse_mla_opt/test_sparse_mla.py which you can use to benchmark the performance of this kernel for different shapes / scenarios seen in the end to end run. I want to focus on batch size 1, 4 for both ragged and padded modes
+
+Benchmark the kernel -> establish a baseline -> optimize -> bench again to see the performance. 
+
+Use the thread level trace from rocprofv3 to look at thread level information and understand where the bottlenecks are and optimize them further (https://rocm.docs.amd.com/projects/rocprofiler-sdk/en/develop/how-to/using-thread-trace.html ). Reimplement the kernel such that bottlenecks are improved - I dont want just cosmetic changes like modifying the tile size to increase occupancy etc.
+
+I want to get atleast a 5x improvement in runtime. 
+
+you can add the optimized kernel in the sparse_mla_opt folder under a rocm_aiter_mla_sparse_v1.py file.
