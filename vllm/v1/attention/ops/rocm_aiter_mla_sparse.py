@@ -1767,6 +1767,32 @@ def rocm_sparse_attn_decode(
             output=output,
         )
 
+    enable_sparse_mla_opt_v2 = os.getenv("VLLM_ENABLE_SPARSE_MLA_OPT_V2", "0")
+    if enable_sparse_mla_opt_v2 == "1":
+        from vllm.v1.attention.ops.sparse_mla_opt.rocm_aiter_mla_sparse_v2 import (
+        rocm_sparse_attn_decode_v2,
+    )
+        return rocm_sparse_attn_decode_v2(
+            q=q,
+            kv_cache=kv_cache,
+            swa_k_cache=swa_k_cache,
+            swa_only=swa_only,
+            topk_indices=topk_indices,
+            topk_lens=topk_lens,
+            swa_indices=swa_indices,
+            swa_lens=swa_lens,
+            swa_ragged_indices=swa_ragged_indices,
+            swa_ragged_indptr=swa_ragged_indptr,
+            topk_ragged_indices=topk_ragged_indices,
+            topk_ragged_indptr=topk_ragged_indptr,
+            attn_sink=attn_sink,
+            scale=scale,
+            head_dim=head_dim,
+            nope_head_dim=nope_head_dim,
+            rope_head_dim=rope_head_dim,
+            output=output,
+        )
+
     assert swa_k_cache.dtype == torch.uint8, (
         "ROCm Triton sparse decode expects uint8 fp8_ds_mla SWA cache, "
         f"got {swa_k_cache.dtype}"
