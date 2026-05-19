@@ -1650,6 +1650,46 @@ def rocm_sparse_attn_prefill(
     output.copy_(output_chunk.to(output.dtype))
 
 
+@functools.lru_cache(maxsize=None)
+def _log_shapes(
+    q_sig, kv_cache_sig, swa_k_cache_sig, swa_only,
+    topk_indices_sig, topk_lens_sig,
+    swa_indices_sig, swa_lens_sig,
+    swa_ragged_indices_sig, swa_ragged_indptr_sig,
+    topk_ragged_indices_sig, topk_ragged_indptr_sig,
+    attn_sink_sig, scale, head_dim, nope_head_dim,
+    rope_head_dim, output_sig,
+):
+    def _fmt(name, s):
+        if s is None:
+            return f"  {name}: None"
+        shape, dtype, device, stride, contig = s
+        return (f"  {name}: shape={list(shape)}, dtype={dtype}, "
+                f"device={device}, stride={stride}, contig={contig}")
+
+    names_sigs = [
+        ("q", q_sig), ("kv_cache", kv_cache_sig),
+        ("swa_k_cache", swa_k_cache_sig),
+        ("topk_indices", topk_indices_sig), ("topk_lens", topk_lens_sig),
+        ("swa_indices", swa_indices_sig), ("swa_lens", swa_lens_sig),
+        ("swa_ragged_indices", swa_ragged_indices_sig),
+        ("swa_ragged_indptr", swa_ragged_indptr_sig),
+        ("topk_ragged_indices", topk_ragged_indices_sig),
+        ("topk_ragged_indptr", topk_ragged_indptr_sig),
+        ("attn_sink", attn_sink_sig), ("output", output_sig),
+    ]
+    lines = ["\n===== rocm_sparse_attn_decode call ====="]
+    for name, sig in names_sigs:
+        lines.append(_fmt(name, sig))
+    lines.append(f"  swa_only: {swa_only}")
+    lines.append(f"  scale: {scale}")
+    lines.append(f"  head_dim: {head_dim}")
+    lines.append(f"  nope_head_dim: {nope_head_dim}")
+    lines.append(f"  rope_head_dim: {rope_head_dim}")
+    lines.append("========================================")
+    print("\n".join(lines), flush=True)
+
+
 def rocm_sparse_attn_decode(
     q: torch.Tensor,
     kv_cache: torch.Tensor | None,
@@ -1670,6 +1710,52 @@ def rocm_sparse_attn_decode(
     rope_head_dim: int,
     output: torch.Tensor,
 ) -> None:
+
+    import os
+
+    # def _t_sig(t):
+    #     if t is None:
+    #         return None
+    #     return (tuple(t.shape), t.dtype, str(t.device), t.stride(),
+    #             t.is_contiguous())
+
+    # if q.device == torch.device("cuda", 0):
+    #     _log_shapes(
+    #         _t_sig(q), _t_sig(kv_cache), _t_sig(swa_k_cache), swa_only,
+    #         _t_sig(topk_indices), _t_sig(topk_lens),
+    #         _t_sig(swa_indices), _t_sig(swa_lens),
+    #         _t_sig(swa_ragged_indices), _t_sig(swa_ragged_indptr),
+    #         _t_sig(topk_ragged_indices), _t_sig(topk_ragged_indptr),
+    #         _t_sig(attn_sink), scale, head_dim, nope_head_dim,
+    #         rope_head_dim, _t_sig(output),
+    #     )
+
+    enable_sparse_mla_opt_v1 = os.getenv("VLLM_ENABLE_SPARSE_MLA_OPT_V1", "0")
+    if enable_sparse_mla_opt_v1 == "1":
+        from vllm.v1.attention.ops.sparse_mla_opt.rocm_aiter_mla_sparse_v1 import (
+        rocm_sparse_attn_decode_v1,
+    )
+        return rocm_sparse_attn_decode_v1(
+            q=q,
+            kv_cache=kv_cache,
+            swa_k_cache=swa_k_cache,
+            swa_only=swa_only,
+            topk_indices=topk_indices,
+            topk_lens=topk_lens,
+            swa_indices=swa_indices,
+            swa_lens=swa_lens,
+            swa_ragged_indices=swa_ragged_indices,
+            swa_ragged_indptr=swa_ragged_indptr,
+            topk_ragged_indices=topk_ragged_indices,
+            topk_ragged_indptr=topk_ragged_indptr,
+            attn_sink=attn_sink,
+            scale=scale,
+            head_dim=head_dim,
+            nope_head_dim=nope_head_dim,
+            rope_head_dim=rope_head_dim,
+            output=output,
+        )
+
     assert swa_k_cache.dtype == torch.uint8, (
         "ROCm Triton sparse decode expects uint8 fp8_ds_mla SWA cache, "
         f"got {swa_k_cache.dtype}"
