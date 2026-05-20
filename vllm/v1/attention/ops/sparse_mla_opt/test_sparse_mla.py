@@ -11,9 +11,18 @@ Usage:
     python test_sparse_mla.py --warmup 50 --rep 200 -o results.csv
     python test_sparse_mla.py --batch 1 4 --mode hca csa
 
+    # Generate thread-level traces for rocprof viewer:
+    python test_sparse_mla.py --trace --trace-output-dir /tmp/att_traces \
+        --impl v2 --mode hca --warmup 5 --rep 3
+
 Modes:
     (default)    Outer driver: spawns rocprofv3 per config, parses traces,
                  writes CSV.
+    --trace      Thread-level trace mode: spawns rocprofv3 with
+                 --advanced-thread-trace (ATT) to generate per-instruction
+                 stall/latency traces viewable in rocprof viewer (ui.perfetto.dev
+                 or rocprofv3 --ui). Output is NOT parsed — files are left in
+                 --trace-output-dir for manual inspection.
     --inner      Called by the driver under rocprofv3. Runs the kernel
                  warmup+rep times, then exits.
 """
@@ -266,6 +275,64 @@ def profile_one(batch, mode, topk_ragged_len, warmup, rep, tmpdir,
     }
 
 
+def trace_one(batch, mode, topk_ragged_len, warmup, rep, outdir,
+              impl="baseline", att_target_cu=0, kernel_include_regex=None):
+    """Run one config under rocprofv3 ATT and leave traces in outdir.
+
+    Uses -d (output directory) so the trace decoder generates
+    ui_output_agent_*_dispatch_* subdirs loadable in rocprof compute viewer.
+    """
+    label = f"B{batch}_{mode}_{topk_ragged_len}"
+    tag = f"att_{label}_{impl}"
+    config_dir = os.path.join(outdir, tag)
+    os.makedirs(config_dir, exist_ok=True)
+
+    att_consecutive = str(rep) if kernel_include_regex else "1"
+    cmd = [
+        "rocprofv3",
+        "--advanced-thread-trace",
+        "--att-target-cu", str(att_target_cu),
+        "--att-consecutive-kernels", att_consecutive,
+    ]
+    if kernel_include_regex:
+        cmd += ["--kernel-include-regex", kernel_include_regex]
+    cmd += [
+        "-d", config_dir,
+        "--",
+        sys.executable, os.path.abspath(__file__),
+        "--inner", str(batch), mode, str(topk_ragged_len),
+        "--warmup", str(warmup), "--rep", str(rep),
+        "--impl", impl,
+    ]
+
+    print(f"  [{label}] running: {' '.join(cmd)}")
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    stdout, stderr = proc.communicate()
+
+    if proc.returncode != 0:
+        print(f"  [{label}] FAILED (rc={proc.returncode})", file=sys.stderr)
+        print(stderr, file=sys.stderr)
+        print(stdout, file=sys.stderr)
+        return False
+
+    entries = os.listdir(config_dir)
+    ui_dirs = [e for e in entries if e.startswith("ui_output_")]
+    other = [e for e in entries if not e.startswith("ui_output_")]
+    print(f"  [{label}] done — {len(entries)} item(s) in {config_dir}/")
+    for d in sorted(ui_dirs):
+        print(f"    {d}/  (viewer dir)")
+    for fn in sorted(other):
+        fpath = os.path.join(config_dir, fn)
+        if os.path.isfile(fpath):
+            size_kb = os.path.getsize(fpath) / 1024
+            print(f"    {fn}  ({size_kb:.1f} KB)")
+        else:
+            print(f"    {fn}/")
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="Bench rocm_sparse_attn_decode")
     parser.add_argument("--inner", nargs=3, metavar=("BATCH", "MODE", "TOPK_RAGGED"),
@@ -281,6 +348,24 @@ def main():
     parser.add_argument("--impl", type=str, default="baseline",
                         choices=["baseline", "v1", "v2"],
                         help="Kernel implementation to benchmark")
+    parser.add_argument("--trace", action="store_true",
+                        help="Generate thread-level traces (ATT) instead of "
+                             "kernel traces. Output is left in --trace-output-dir "
+                             "for viewing with rocprof viewer.")
+    parser.add_argument("--trace-output-dir", type=str,
+                        default=None,
+                        help="Directory to store ATT trace output. "
+                             "Created if it does not exist. "
+                             "(default: auto-generated temp dir)")
+    parser.add_argument("--att-target-cu", type=int, default=0,
+                        help="CU to target for ATT collection (default: 0)")
+    parser.add_argument("--topk-ragged-len", type=int, nargs="+", default=None,
+                        help="Filter to specific topk_ragged_len values "
+                             "(default: all from TEST_CONFIGS)")
+    parser.add_argument("--kernel-include-regex", type=str, default=None,
+                        help="Regex passed to rocprofv3 --kernel-include-regex "
+                             "to filter ATT collection. When --impl=v2 and this "
+                             "is not set, defaults to matching v2 Triton kernels.")
     args = parser.parse_args()
 
     if args.inner:
@@ -296,7 +381,54 @@ def main():
         configs = [c for c in configs if c[0] in args.batch]
     if args.mode:
         configs = [c for c in configs if c[1] in args.mode]
+    if args.topk_ragged_len:
+        configs = [c for c in configs if c[2] in args.topk_ragged_len]
 
+    # ── Thread-level trace (ATT) mode ──────────────────────────────────
+    if args.trace:
+        if args.trace_output_dir:
+            outdir = args.trace_output_dir
+        else:
+            outdir = tempfile.mkdtemp(prefix="att_sparse_mla_")
+        os.makedirs(outdir, exist_ok=True)
+
+        kernel_include_regex = args.kernel_include_regex
+        if kernel_include_regex is None:
+            if args.impl == "v2":
+                kernel_include_regex = (
+                    "_v2_partial_kernel|_v2_reduce_kernel|_v2_single_kernel"
+                )
+            elif args.impl == "v1":
+                kernel_include_regex = (
+                    "_v1_partial_kernel|_v1_reduce_kernel"
+                )
+
+        print(f"\n{'='*90}")
+        print(f"  ATT thread-level traces  (impl={args.impl}, warmup={args.warmup}, "
+              f"rep={args.rep}, target_cu={args.att_target_cu})")
+        if kernel_include_regex:
+            print(f"  kernel filter: {kernel_include_regex}")
+        print(f"  output dir: {outdir}")
+        print(f"{'='*90}\n")
+
+        ok = 0
+        for batch, mode, topk_ragged_len in configs:
+            success = trace_one(
+                batch, mode, topk_ragged_len,
+                args.warmup, args.rep, outdir,
+                impl=args.impl, att_target_cu=args.att_target_cu,
+                kernel_include_regex=kernel_include_regex,
+            )
+            if success:
+                ok += 1
+
+        print(f"\n{ok}/{len(configs)} configs traced.")
+        print(f"Trace files in: {outdir}")
+        print("Open with:  rocprofv3 --ui  or load .json/.pftrace in "
+              "ui.perfetto.dev")
+        return
+
+    # ── Normal kernel-trace benchmark mode ─────────────────────────────
     csv_header = ["batch", "mode", "topk_ragged_len", "time_us", "kernels"]
     rows = []
 
