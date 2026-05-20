@@ -164,6 +164,10 @@ def run_inner(batch, mode, topk_ragged_len, warmup, rep, impl="baseline"):
         from vllm.v1.attention.ops.sparse_mla_opt.rocm_aiter_mla_sparse_v2 import (  # noqa: E501
             rocm_sparse_attn_decode_v2 as kernel_fn,
         )
+    elif impl == "v3":
+        from vllm.v1.attention.ops.sparse_mla_opt.rocm_aiter_mla_sparse_v3 import (  # noqa: E501
+            rocm_sparse_attn_decode_v3 as kernel_fn,
+        )
     else:
         from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
             rocm_sparse_attn_decode as kernel_fn,
@@ -190,7 +194,9 @@ def parse_trace(csv_path, rep):
 
     kernel_rows = df[df["Kernel_Name"].str.contains(
         "sparse_attn|_paged_attn|triton_|_v1_partial_kernel|_v1_reduce_kernel"
-        "|_v2_partial_kernel|_v2_reduce_kernel|_v2_single_kernel",
+        "|_v2_partial_kernel|_v2_reduce_kernel|_v2_single_kernel"
+        "|v3_single_kernel|v3_partial_kernel|v3_reduce_kernel|v3_mfma_kernel"
+        "|v3_mfma_partial_kernel|v3_mfma_reduce_kernel",
         case=False, na=False,
     )]
     if kernel_rows.empty:
@@ -279,7 +285,7 @@ def main():
                         choices=["hca", "csa"],
                         help="Filter to specific modes (default: both)")
     parser.add_argument("--impl", type=str, default="baseline",
-                        choices=["baseline", "v1", "v2"],
+                        choices=["baseline", "v1", "v2", "v3"],
                         help="Kernel implementation to benchmark")
     args = parser.parse_args()
 
