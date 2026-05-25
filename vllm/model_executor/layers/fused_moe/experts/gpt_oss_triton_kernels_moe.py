@@ -34,6 +34,139 @@ from ..utils import swiglu_limit_func
 logger = init_logger(__name__)
 
 
+# ---------- shape-logging for matmul_ogs benchmark construction ----------
+from functools import cache
+
+
+def _tensor_meta(t):
+    if t is None:
+        return (None, None)
+    return (tuple(t.shape), str(t.dtype))
+
+
+def _layout_name(t):
+    if t is None:
+        return None
+    storage = getattr(t, "storage", None)
+    if storage is None:
+        return None
+    lay = getattr(storage, "layout", None)
+    return getattr(lay, "name", None) if lay else None
+
+
+@cache
+def _log_matmul_ogs_shapes(
+    call_site,
+    x_shape,
+    x_dtype,
+    w_shape,
+    w_dtype,
+    w_layout,
+    bias_meta,
+    y_shape,
+    y_dtype,
+    gather_src_shape,
+    scatter_src_shape,
+    routing_n_expts_tot,
+    routing_n_expts_act,
+    routing_gate_scal_shape,
+    routing_expt_hist_shape,
+    gammas_meta,
+    w_scale_meta,
+    w_scale_layout,
+    act_scale_meta,
+    precision_out_dtype,
+    precision_max_num_imprecise_acc,
+    precision_allow_tf32,
+):
+    logger.info(
+        "matmul_ogs shapes [%s]:\n"
+        "  x:              shape=%-20s dtype=%s\n"
+        "  w:              shape=%-20s dtype=%s  layout=%s\n"
+        "  bias:           %s\n"
+        "  y:              shape=%-20s dtype=%s\n"
+        "  gather_src:     shape=%s\n"
+        "  scatter_src:    shape=%s\n"
+        "  routing:        n_expts_tot=%s  n_expts_act=%s\n"
+        "  gate_scal:      shape=%s\n"
+        "  expt_hist:      shape=%s\n"
+        "  gammas:         %s\n"
+        "  weight_scale:   %s  layout=%s\n"
+        "  act_scale:      %s\n"
+        "  out_dtype:      %s\n"
+        "  max_imprecise:  %s  allow_tf32: %s",
+        call_site,
+        x_shape,
+        x_dtype,
+        w_shape,
+        w_dtype,
+        w_layout,
+        bias_meta,
+        y_shape,
+        y_dtype,
+        gather_src_shape,
+        scatter_src_shape,
+        routing_n_expts_tot,
+        routing_n_expts_act,
+        routing_gate_scal_shape,
+        routing_expt_hist_shape,
+        gammas_meta,
+        w_scale_meta,
+        w_scale_layout,
+        act_scale_meta,
+        precision_out_dtype,
+        precision_max_num_imprecise_acc,
+        precision_allow_tf32,
+    )
+
+
+def _capture_matmul_ogs_shapes(
+    call_site,
+    x,
+    w,
+    bias,
+    routing_data,
+    y,
+    gather_indx,
+    scatter_indx,
+    gammas,
+    precision_config,
+):
+    pc = precision_config
+    ws = pc.weight_scale if pc else None
+    _log_matmul_ogs_shapes(
+        call_site,
+        tuple(x.shape),
+        str(x.dtype),
+        tuple(w.shape),
+        str(w.dtype),
+        _layout_name(w),
+        _tensor_meta(bias),
+        tuple(y.shape) if y is not None else None,
+        str(y.dtype) if y is not None else None,
+        tuple(gather_indx.src_indx.shape) if gather_indx else None,
+        tuple(scatter_indx.src_indx.shape) if scatter_indx else None,
+        routing_data.n_expts_tot if routing_data else None,
+        routing_data.n_expts_act if routing_data else None,
+        tuple(routing_data.gate_scal.shape)
+        if routing_data and routing_data.gate_scal is not None
+        else None,
+        tuple(routing_data.expt_hist.shape)
+        if routing_data and routing_data.expt_hist is not None
+        else None,
+        _tensor_meta(gammas),
+        _tensor_meta(ws),
+        _layout_name(ws),
+        _tensor_meta(pc.act_scale) if pc else None,
+        str(pc.out_dtype) if pc else None,
+        pc.max_num_imprecise_acc if pc else None,
+        pc.allow_tf32 if pc else None,
+    )
+
+
+# ---------- end shape-logging ------------------------------------------
+
+
 def _triton_kernel_moe_supports_current_device() -> bool:
     # Shared device gate for the OAI Triton MoE expert classes.
     # Platform-aware to avoid ROCm capability aliasing — cap (9, 0)
@@ -846,6 +979,18 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
 
         gammas = routing_data.gate_scal if routing_data else None
 
+        _capture_matmul_ogs_shapes(
+            "W1_gate_up",
+            hidden_states,
+            w1,
+            quant_config.w1_bias,
+            routing_data,
+            intermediate_cache1,
+            gather_indx,
+            None,
+            gammas if apply_router_weight_on_input else None,
+            quant_config.w1_precision,
+        )
         matmul_ogs(
             hidden_states,
             w1,
@@ -899,6 +1044,18 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         # Set n_expts_act to 1 to unfuse the sum so we can do it manually via moe_sum.
         routing_data.n_expts_act = 1
 
+        _capture_matmul_ogs_shapes(
+            "W2_down",
+            intermediate_cache2[gather_indx.src_indx],
+            w2,
+            quant_config.w2_bias,
+            routing_data,
+            intermediate_cache3,
+            None,
+            scatter_indx,
+            None if apply_router_weight_on_input else gammas,
+            quant_config.w2_precision,
+        )
         matmul_ogs(
             intermediate_cache2[gather_indx.src_indx],
             w2,
