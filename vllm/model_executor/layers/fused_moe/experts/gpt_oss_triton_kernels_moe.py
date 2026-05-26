@@ -152,7 +152,8 @@ def _capture_matmul_ogs_shapes(
         if routing_data and routing_data.gate_scal is not None
         else None,
         tuple(routing_data.expt_hist.shape)
-        if routing_data and not callable(routing_data.expt_hist)
+        if routing_data
+        and not callable(routing_data.expt_hist)
         and routing_data.expt_hist is not None
         else None,
         _tensor_meta(gammas),
@@ -980,18 +981,18 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
 
         gammas = routing_data.gate_scal if routing_data else None
 
-        _capture_matmul_ogs_shapes(
-            "W1_gate_up",
-            hidden_states,
-            w1,
-            quant_config.w1_bias,
-            routing_data,
-            intermediate_cache1,
-            gather_indx,
-            None,
-            gammas if apply_router_weight_on_input else None,
-            quant_config.w1_precision,
-        )
+        # _capture_matmul_ogs_shapes(
+        #     "W1_gate_up",
+        #     hidden_states,
+        #     w1,
+        #     quant_config.w1_bias,
+        #     routing_data,
+        #     intermediate_cache1,
+        #     gather_indx,
+        #     None,
+        #     gammas if apply_router_weight_on_input else None,
+        #     quant_config.w1_precision,
+        # )
         matmul_ogs(
             hidden_states,
             w1,
@@ -1045,18 +1046,18 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         # Set n_expts_act to 1 to unfuse the sum so we can do it manually via moe_sum.
         routing_data.n_expts_act = 1
 
-        _capture_matmul_ogs_shapes(
-            "W2_down",
-            intermediate_cache2[gather_indx.src_indx],
-            w2,
-            quant_config.w2_bias,
-            routing_data,
-            intermediate_cache3,
-            None,
-            scatter_indx,
-            None if apply_router_weight_on_input else gammas,
-            quant_config.w2_precision,
-        )
+        # _capture_matmul_ogs_shapes(
+        #     "W2_down",
+        #     intermediate_cache2[gather_indx.src_indx],
+        #     w2,
+        #     quant_config.w2_bias,
+        #     routing_data,
+        #     intermediate_cache3,
+        #     None,
+        #     scatter_indx,
+        #     None if apply_router_weight_on_input else gammas,
+        #     quant_config.w2_precision,
+        # )
         matmul_ogs(
             intermediate_cache2[gather_indx.src_indx],
             w2,

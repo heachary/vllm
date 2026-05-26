@@ -1,0 +1,11 @@
+I want to optimize the performance of the matmul_ogs kernel tested by test_matmul_ogs.py. Use this test to bench the kernel -> establish a baseline -> make changes to the kernel -> bench the kernel again -> repeat until the performance is optimized. The performance needs to be optimized against all the token counts listed in the test file. 
+
+The test provides options to capture a thread level trace. Run this to analyse the performance of the kernel to identify the bottlenecks / stalls and improve the performance. 
+
+If the kernel is found to be memory latency bound, here are a few things to try:
+ - Split-K > 1 — Currently disabled for MXFP4 in opt_flags.py. Grid is only 192 tiles on 304 CUs  split_k=2 doubles the grid, fills idle CUs, more concurrent HBM loads.
+ - num_stages=3 — Currently 2. More pipeline depth = more loads in flight per wave = better per-wave bandwidth utilization.
+ - Smaller BLOCK_M=16 — Halves accumulator registers, may allow higher occupancy (more waves per CU = more concurrent loads). Doesn't reduce weight loads but frees resources.
+Modify the kernel implementation such that we have more requests in flight to better use the HBM bandwidth. 
+
+I want a 5x improvement in the performance of the kernel across all token counts. Feel free to switch from Triton to HIP if that helps to get the performance. 
