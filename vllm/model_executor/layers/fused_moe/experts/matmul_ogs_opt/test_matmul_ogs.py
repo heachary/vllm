@@ -47,7 +47,7 @@ NUM_EXPERTS = 384  # all experts per rank (TP shards intermediate)
 TOPK = 6
 NUM_WARPS = 8
 
-NUM_TOKENS_SWEEP = [1, 2, 4, 8, 16, 32, 64, 96, 128, 256]
+NUM_TOKENS_SWEEP = [1, 2, 4, 8, 16, 32, 64]
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +142,7 @@ def build_inputs(M, call_site, device="cuda:0"):
         pc = PrecisionConfig(
             weight_scale=w_scale, flex_ctx=FlexCtx(rhs_data=InFlexData())
         )
+        gammas = routing_data.gate_scal
         return dict(
             x=x,
             w=w,
@@ -150,7 +151,7 @@ def build_inputs(M, call_site, device="cuda:0"):
             gather_indx=None,
             scatter_indx=scatter_indx,
             precision_config=pc,
-            gammas=None,
+            gammas=gammas,
             y=y,
         )
 

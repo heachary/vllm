@@ -152,7 +152,8 @@ def _capture_matmul_ogs_shapes(
         if routing_data and routing_data.gate_scal is not None
         else None,
         tuple(routing_data.expt_hist.shape)
-        if routing_data and routing_data.expt_hist is not None
+        if routing_data and not callable(routing_data.expt_hist)
+        and routing_data.expt_hist is not None
         else None,
         _tensor_meta(gammas),
         _tensor_meta(ws),
